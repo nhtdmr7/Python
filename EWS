@@ -1,0 +1,382 @@
+# -*- coding: utf-8 -*-
+""""
+Created on Thu Aug  9 19:54:15 2018 
+@author: Radar_Jamming_Laboratory. 204-{Shixun You}
+
+"""
+import util #metni sayıya çevirme
+import generate #oluşturma kütüphanesi
+import viewerUI #görüntüleyici kullanıcı arayüzü kütüphanesi
+import resources #kaynaklar
+# import recognization 
+
+import math #matematik kütüphanesi
+import pyglet #geliştirme kütüphanesi
+import numpy as np #dizi -kısaltma --gerekliliği aza indirmek için kullanılıyor
+import numpy.random as npr #random dizi -kısaltma
+
+#from PIL import Image
+
+MAP_CENTER = np.array([300, 300]) #300-300 harita merkezi için dizi oluşturmuş
+
+DIFFICULTY = [1, 0.5, 0.2, 0.1] # 0-3 LEVELS 
+
+MEMORY_CAPACITY = 300000 #hafıza kapasitesi
+
+random_target = generate.playerGenerate(_type='Station', _id=1) #rastgele hedefe hangi kanalda olduğunu oluşturuyoruz
+
+#------------------------------------------------------------------------------ 
+#------------------------------------------------------------------------------  
+class ElectronicWarfare_Env(object):
+    
+    "game environment based on 600 x (600+450) pixels, this version only supports 1 vs 1"  #1vs1 destekliyor
+    
+    viewer = None #izleyici yok
+        
+    stateDim = 9 #boyutunu belirtiyoruz dim?boyut
+    
+    actionDim = 2
+    
+    name = None
+              
+    def __init__(self): #yapıcı fonksiyon 
+        
+        "游戏成员初始化" #Oyun üyesi başlatma
+        
+        self.winner = 'None' #yok              
+        
+        self.in_range = 0 #menzil boş
+        
+        self.initial_dis = 0 #ilk görüntülemede kimse yok
+        
+        self.players = {} #oyuncuları içine atıyoruz   
+        
+        # attacker                
+        self.players['attackers'] = [generate.playerGenerate(_type='UCAV', _id=1)] #saldırı takımını oluşturuyoruz saldıranların tipi UCAV???
+        
+        # defender
+        self.players['defenders'] = [generate.playerGenerate(_type='Station', _id=1)] #defans takımını oluşturuyoruz defansların tipi Station????
+        
+        # map
+        self.map = pyglet.sprite.Sprite(resources.map_image) #kaynak kütüphanesinden map resmi eklemiş + 
+        
+    #--------------------------------------------------------------------------    
+    def seed(self, num): #function
+        
+        np.random.seed(num) #rastgele dizi sınıflama yapmış
+        
+    #--------------------------------------------------------------------------    
+    def levels(self, K=None):
+        
+        if K is None: 
+            K = 0 #eğer k yoksa k=0 ata
+        
+        self.dt = DIFFICULTY[K] #zorluk dizisi
+        
+        self.name = 'Explorer_V1 (15 x 15 km2)_'+str(self.dt) #keşfettiği mesafe
+        
+        return int(400/self.dt) #zorluk derecesine oranını döndürüyor
+        
+    #--------------------------------------------------------------------------            
+    def reset(self, display=True, site=None): #sıfırlama fonksiyonu, görüntüleme var, mevki yok kabul ediliyor
+        
+        "游戏成员属性重置" #Oyun üyesi özellikleri sıfırlandı
+        
+        self.in_range = 0 #menzilde kimse yoksa     
+         
+        for player in self.players['attackers']+self.players['defenders']: #saldırı ve defanstakileri 
+            
+            if display:#görüntüleme true ise
+                
+                if self.viewer is not None: #eğer izleyici yoksa 
+            
+                    self.viewer.OperatingStep = 0 #izleyici çalışma adımı 
+                    
+                    self.winner = 'None' #kazanan yok  
+                
+                player.re_init(site, batch=self.viewer.batch, group=self.viewer.foreground) #mevki,grup --> izleyici grubu 
+                #gruba önplandaki izleyiciyi atamış -------- istekli oyuncuları ekleme
+             
+            else: #diğer durumlar
+            
+                player.re_init(site) #istekli oyuncuları
+            
+            player.init_type(_type=player._type)  # tip belirlemesi
+            
+            for ARM_ in player.kidsARM: #çocuk armların içindeki armlar
+                ARM_[0].batch = None # 0. indexteki grup yok 
+                                 
+        # electromagnetic spectrum environment elektromanyetik spektrum ortamı
+        Att, Def = self.players['attackers'][0], self.players['defenders'][0] #att= attackers , def = defenders att ve defin içine dizidekileri atıyor
+        
+        dis, vec = util.displacement(Att.spherePos, Def.spherePos) #saldıranların pozisyon alanı ve defanstakilerin pozisyon alanı
+        #dis, vec in yerine alıyoruz att.spherePos 
+        
+        disp = np.array([dis*vec[0]/15, dis*vec[1]/15, (Def.h.real-Att.h.real) / 7.5]) 
+        
+        self.initial_dis = dis #dis'in ilk yerini alıyor
+        
+        Att.cESE(disp) # şimdiki yerini araştırıyor
+        
+        Att.path.append(Att.spherePos) #pozisyon alanını ekliyor
+               
+        return Att.pointState[-1] #son noktadaki durumunu geri döndürüyor        
+            
+    #--------------------------------------------------------------------------       
+    def step(self, action): #önlem
+        
+        "与环境交互" #Çevre ile etkileşim
+        
+        reward = 0 #ödül
+               
+        done = True #tamam True?
+        
+        Att, Def = self.players['attackers'][0], self.players['defenders'][0] #att= attackers , def = defenders att ve defin içine dizidekileri atıyor
+                
+        # decoding actions for attackers ---- saldırganlar için kod çözme eylemleri     
+        angles = action*math.pi*[1, 0.5] #açıyı hesaplıyoruz
+        
+        aMov = util.unitV(angles) #açı bir harekete atıyor
+
+        Att.pos_plan(self.dt, aMov) #saldıranların pozisyon planı   
+        
+        for player in self.players['attackers']+self.players['defenders']:
+                                    
+            player.collision(self.players['attackers']+self.players['defenders']) # detecting the collision of UCAVs,,, UCAV'ların çarpışmasını tespit etmek                     
+            #çarpışan saldıran ve defansları tespit ediyor
+        
+        # 只用来评估作战胜利   Sadece savaş başarısını değerlendirmek için kullanılır 
+        if Def.is_dead: #defans ölürse eğer
+            
+            self.winner = 'attacker' #kazanan saldıranlar 
+        
+            reward += 100 # win add 100 #kazanana 100 ekliyor
+            
+        else: 
+            
+            self.winner = 'None' #kazanan yok 
+                
+        # operation /operasyon 
+        Def.operation(Att) #defanslar saldıranlara göre operasyon ayarı
+                
+        Def.checkingLib() #defender kontrol
+        
+        dis_r, vec_r = Att.operation(Def) # real , defanstakilere göre saldıranların konumu
+            
+        Att.checkingLib() #kontrol
+        
+        disp_r = np.array([dis_r*vec_r[0]/15, dis_r*vec_r[1]/15, (Def.h.real-Att.h.real) / 7.5]) # real disp_r dizisi oluşturuyoruz
+        
+        # reward shaping --- ödül şekillendirme        
+        angle_behavior = math.acos(aMov.dot(vec_r))/math.pi #açının davranışı
+        
+        reward -= np.linalg.norm(disp_r) #disp_r dizisindeki sıra algoritmasına göre ödülü azaltıyoruz
+        
+        reward += self.search_reward(Att) #saldıranların ödülünü araştırıp, ödülü artırıyoruz
+        
+        if dis_r < Att.radar.dR['Search']: # capture
+            
+            reward += 1 #ödüle 1 artırma
+            
+            self.in_range += 1 #menzili 1 artırma
+            
+            if self.in_range > 50: #menzil 50 den büyük ise
+                
+                done = True #1 çalışsın
+                         
+        if self.winner is 'None': #kazanan yoksa 
+            
+            if (0 <= Att.x <= 2*MAP_CENTER[0] and 0 <= Att.y <= 2*MAP_CENTER[0] and Att.h.in_boundry()): # ??
+
+                done = False #0 çalışsın
+
+        if not Att.radar.TIM: #radarında değilse eğer TIM??ARALIK
+            
+            # some core search algorithms are not allowed to be made public    #bazı çekirdek arama algoritmalarının herkese açık hale getirilmesine izin verilmiyor        
+            # target_Pos, target_h = recognization.probabilisticIndividual(Att.path) ,,,, attacker yörüngesindeki bireyleri algılama
+            target_Pos, target_h = random_target.spherePos, random_target.h.real #hedef pozisyonunun yerküre pozisyonu ve gerçek pozisyonunu atıyoruz 
+        
+        else: 
+            
+            target_Pos, target_h = Att.radar.TIM[0].spherePos, Att.radar.TIM[0].h.real
+            
+        dis, vec = util.displacement(Att.spherePos, target_Pos) # estimated -- tahmini yerlerini alıyor
+        
+        disp = np.array([dis*vec[0]/15, dis*vec[1]/15, (target_h-Att.h.real) / 7.5]) # estimated aldığımız tahmini değerlere göre diziye atıyoruz               
+                                 
+        Att.cESE(disp) # şimdiki yeri ?
+        
+        Att.path.append(Att.spherePos) #yerküredeki yerini , yörüngeye ekliyoruz
+                 
+        #print(Att.pointState[-1], reward)
+                                           
+        return Att.pointState[-1], reward, done, angle_behavior #nokta durumu ödül uygun açı davranışını geri döndürüyor
+     
+    #--------------------------------------------------------------------------
+    def render(self):
+        
+        "环境展示" #Çevre göstergesi
+        
+        if self.viewer is None: #izleyici yoksa 
+            
+            self.viewer = Viewer(self.map, self.players, self.name) #map oyuncular ve adını tanımlıyoruz
+            
+        self.viewer.render(self.winner) #kazananlar izleyiciye geçiyor
+        
+    #--------------------------------------------------------------------------
+    def search_reward(self, player):
+        
+        """
+        though we envisaged many ways to assess the quality of UCAV's movement 
+        
+        at a certain time, this look like the best one
+        
+        """
+        #şarjörleri hesaplıyoruz
+        
+        min_max = [0, 1]
+        
+        l = player.v.upper*self.dt
+        
+        rx_ = -np.clip((player.spherePos[0]-7.5) / l+1, *min_max) 
+        
+        ry_ = -np.clip((player.spherePos[1]-7.5) / l+1, *min_max)
+        
+        rh_ = -np.clip((player.h.real-8) / l+1, *min_max)
+        
+        _rx = -np.clip(1 - (player.spherePos[0]+7.5) / l, *min_max)
+       
+        _ry  = -np.clip(1 - (player.spherePos[1]+7.5) / l, *min_max)
+
+        _rh  = -np.clip(1 - (player.h.real-0.5) / l, *min_max)
+        
+        r = sum([_rx, _ry, _rh, rx_, ry_, rh_])
+
+        return r
+    
+#------------------------------------------------------------------------------
+class benchAgent(object): # tezgah ajanı
+    
+    def __init__(self, s_dim, a_dim):
+    
+        self.memory = np.zeros((MEMORY_CAPACITY, s_dim*2+a_dim+1), dtype=np.float32) #hafızaya sıfır noktasını atıyor 
+            
+        self.memory_full = False #hafızanın doluluğunu false yapıyor
+        
+        self.pointer = 0 #göstergemiz 
+        
+    #--------------------------------------------------------------------------
+    def store_transition(self, s, a, r, s_): # hafıza değişimi
+        
+        None
+        
+#        transition = np.hstack((s, a, [r], s_))
+#        
+#        index = self.pointer % MEMORY_CAPACITY  
+#        
+#        self.memory[index, :] = transition
+#        
+#        self.pointer += 1
+#        
+#        if self.pointer > MEMORY_CAPACITY:     
+#            
+#            self.memory_full = True
+            
+    #--------------------------------------------------------------------------
+    def choose_action(self, state=None): #eylem seçme ---- belirtilmediyse yok kabul ediliyor
+        
+        "generate motion" #hareket üret
+                 
+        action = npr.uniform(-1, 1, 2) #random bir üniforma seçlir   
+
+        return action 
+       
+#------------------------------------------------------------------------------  
+#------------------------------------------------------------------------------        
+class Viewer(viewerUI.ViewerUI): #izleyici sınıfı
+    
+    "对抗过程可视化"  #Çekişmeli sürecin görselleştirilmesi
+    
+    def __init__(self, _map, players, gameName):
+        
+        # vsync=False to speed up training Eğitimi hızlandırmak için vsync kapalı
+        super(Viewer, self).__init__(       
+                                     width=1050,  #genişlik
+                                     height=600,  #yükseklik
+                                     resizable=False, #boyutlanabilirlik
+                                     caption=gameName, #altyazı--oyunadı
+                                     vsync=False 
+        )
+        
+#        pyglet.gl.glClearColor(125, 125, 1, 1) 
+        
+        self.map = _map
+        
+        self.players = players
+              
+        for member in self.players['attackers']+self.players['defenders']: #
+            
+            member.batch = self.batch #üye grubunu atama
+            
+            member.group = self.foreground  #önplandakileri üye grubuna atama
+            
+        self.map.batch, self.map.group = self.batch, self.background  #
+                
+    #--------------------------------------------------------------------------
+    def render(self, winner): #kazananlar
+        
+        "显示" #ekran
+        
+        self.update(winner) #kazananları güncelleme
+        
+        self.switch_to() #bağlama
+        
+        self.dispatch_events() #olayları gönderme
+        
+        self.dispatch_event('on_draw') #
+        
+        self.flip() #çevir
+        
+    #--------------------------------------------------------------------------
+    def on_draw(self): #düzenleme
+        
+        self.clear() #temizleme
+        
+        self.batch.draw() #grubu düzenleme
+        
+    #--------------------------------------------------------------------------    
+    def update(self, winner):  #kazananlar güncelleme
+        
+        "更新显示界面"      #Ekran arayüzünü güncelle
+        
+        # show for Operating cycle         Operasyon döngüsü için göster
+        self.OperatingStep += 1 #operasyon adımlarını 1 artır
+        
+        self.Operating_step_label.text = 'Operating Step: '+str(self.OperatingStep) #operasyon adımını yazdırma
+        
+        self.winner_label.text = 'Winner: '+winner #kazananını yazdırma
+        
+        if self.OperatingStep%1 == 0: #operasyon adımının modu 0'a eşit ise
+        
+            self.update_attributes(self.players['attackers'][0], 'attacker') #güncelleme özellikleri
+    
+            self.update_attributes(self.players['defenders'][0], 'defender') #güncelleme özellikleri
+                                                           
+            for player in self.players['attackers']+self.players['defenders']: #players dizisindeki saldıranlar ve defansların içindeki player
+                
+                player.update(self.dt) #güncellenen oyuncu
+
+""                                                                           ""
+"""----------------------------test fuction for EW env----------------------"""
+""                                                                           ""                            
+if __name__ == '__main__':    
+    
+    env = ElectronicWarfare_Env() #
+
+    MAX_EP_STEPS = env.levels(0)
+    
+    RENDER = 1  # rendering wastes time --/renderleme zaman israfıdır
+    
+    env.seed(1) 
+    
+    env.render()
